@@ -11,6 +11,22 @@ except ImportError:
 
 
 class KeepDatabaseTestSuiteRunner(DjangoTestSuiteRunner):
+    '''DjangoTestSuiteRunner modified to optionally reuse the test
+    database instead of destroying and recreating it if the reuse_db
+    argument is True.
+
+    Modifications:
+     - Add create_test_db() and _create_test_db() methods from
+       db.backends.creation.BaseDatabaseCreation
+     - Modify them to optionally reuse the test database.
+     - Add the connection object as an attribute of this instance
+     - Call self.create_test_db() and self._create_test_db() methods
+       instead of the connection object's version of these methods.
+    '''
+
+    def __init__(self, reuse_db=False, **kwargs):
+        self.reuse_db = reuse_db
+        super(KeepDatabaseTestSuiteRunner, self).__init__(**kwargs)
 
     def setup_databases(self, **kwargs):
         '''
@@ -51,9 +67,9 @@ class KeepDatabaseTestSuiteRunner(DjangoTestSuiteRunner):
         mirrors = []
         for (host, port, engine, db_name), aliases in dependency_ordered(test_databases.items(), dependencies):
             # Actually create the database for the first connection
-            connection = connections[aliases[0]]
+            self.connection = connection = connections[aliases[0]]
             old_names.append((connection, db_name, True))
-            test_db_name = connection.creation.create_test_db(self.verbosity, autoclobber=not self.interactive)
+            test_db_name = self.create_test_db(self.verbosity, autoclobber=not self.interactive)
             for alias in aliases[1:]:
                 connection = connections[alias]
                 if db_name:
@@ -64,7 +80,7 @@ class KeepDatabaseTestSuiteRunner(DjangoTestSuiteRunner):
                     # the name isn't important -- e.g., SQLite, which uses :memory:.
                     # Force create the database instead of assuming it's a duplicate.
                     old_names.append((connection, db_name, True))
-                    connection.creation.create_test_db(self.verbosity, autoclobber=not self.interactive)
+                    self.create_test_db(self.verbosity, autoclobber=not self.interactive)
 
         for alias, mirror_alias in mirrored_aliases.items():
             mirrors.append((alias, connections[alias].settings_dict['NAME']))
@@ -82,11 +98,12 @@ class KeepDatabaseTestSuiteRunner(DjangoTestSuiteRunner):
         for alias, old_name in mirrors:
             connections[alias].settings_dict['NAME'] = old_name
         # Destroy all the non-mirror databases
-        for connection, old_name, destroy in old_names:
-            if destroy:
-                connection.creation.destroy_test_db(old_name, self.verbosity)
-            else:
-                connection.settings_dict['NAME'] = old_name
+        if not self.reuse_db:
+            for connection, old_name, destroy in old_names:
+                if destroy:
+                    connection.creation.destroy_test_db(old_name, self.verbosity)
+                else:
+                    connection.settings_dict['NAME'] = old_name
 
     def create_test_db(self, verbosity=1, autoclobber=False):
         """
@@ -102,7 +119,7 @@ class KeepDatabaseTestSuiteRunner(DjangoTestSuiteRunner):
 
         self.connection.close()
         self.connection.settings_dict["NAME"] = test_database_name
-        can_rollback = self._rollback_works()
+        can_rollback = self.connection.creation._rollback_works()
         self.connection.settings_dict["SUPPORTS_TRANSACTIONS"] = can_rollback
 
         call_command('syncdb', verbosity=verbosity, interactive=False, database=self.connection.alias)
@@ -126,7 +143,7 @@ class KeepDatabaseTestSuiteRunner(DjangoTestSuiteRunner):
 
         Internal implementation - creates the test db tables.
         """
-        suffix = self.sql_table_creation_suffix()
+        suffix = self.connection.creation.sql_table_creation_suffix()
 
         if self.connection.settings_dict['TEST_NAME']:
             test_database_name = self.connection.settings_dict['TEST_NAME']
@@ -139,26 +156,30 @@ class KeepDatabaseTestSuiteRunner(DjangoTestSuiteRunner):
         # if the database supports it because PostgreSQL doesn't allow
         # CREATE/DROP DATABASE statements within transactions.
         cursor = self.connection.cursor()
-        self.set_autocommit()
+        self.connection.creation.set_autocommit()
         try:
             cursor.execute("CREATE DATABASE %s %s" % (qn(test_database_name), suffix))
         except Exception, e:
-            sys.stderr.write("Got an error creating the test database: %s\n" % e)
-            if not autoclobber:
-                confirm = raw_input("Type 'yes' if you would like to try deleting the test database '%s', or 'no' to cancel: " % test_database_name)
-            if autoclobber or confirm == 'yes':
-                try:
-                    if verbosity >= 1:
-                        print "Destroying old test database..."
-                    cursor.execute("DROP DATABASE %s" % qn(test_database_name))
-                    if verbosity >= 1:
-                        print "Creating test database..."
-                    cursor.execute("CREATE DATABASE %s %s" % (qn(test_database_name), suffix))
-                except Exception, e:
-                    sys.stderr.write("Got an error recreating the test database: %s\n" % e)
-                    sys.exit(2)
+            if self.reuse_db:
+                if verbosity >= 1:
+                    print "Database already exists. Reusing test database..."
             else:
-                print "Tests cancelled."
-                sys.exit(1)
+                sys.stderr.write("Got an error creating the test database: %s\n" % e)
+                if not autoclobber:
+                    confirm = raw_input("Type 'yes' if you would like to try deleting the test database '%s', or 'no' to cancel: " % test_database_name)
+                if autoclobber or confirm == 'yes':
+                    try:
+                        if verbosity >= 1:
+                            print "Destroying old test database..."
+                        cursor.execute("DROP DATABASE %s" % qn(test_database_name))
+                        if verbosity >= 1:
+                            print "Creating test database..."
+                        cursor.execute("CREATE DATABASE %s %s" % (qn(test_database_name), suffix))
+                    except Exception, e:
+                        sys.stderr.write("Got an error recreating the test database: %s\n" % e)
+                        sys.exit(2)
+                else:
+                    print "Tests cancelled."
+                    sys.exit(1)
 
         return test_database_name
