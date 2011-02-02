@@ -19,6 +19,8 @@ Usage:
 
     python manage.py quicktest --reuse_db [app_label]
 
+Compatibility:
+
  - Should work with Django >= 1.2
  - Based on Django 1.2.4
  - Tested with Django 1.2.3
@@ -26,5 +28,6 @@ Usage:
 Original quicktest.py and keep_database.py by Eric Holscher: <https://github.com/ericholscher/django-test-utils>
 
 Differences from django-test-utils:
+
  - Support for multiple databases
  - Uses Django `create_test_db` and `_create_test_db` methods
